@@ -17,6 +17,7 @@ enqueue() concurrently.
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import time
@@ -28,6 +29,8 @@ import torch
 
 from .manifest import CheckpointVersion, Manifest
 from .store import ContentAddressedStore
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +71,8 @@ class AsyncWriter:
         self._queue: queue.Queue[Optional[WriteJob]] = queue.Queue(
             maxsize=max_pending
         )
+        self._all_done = threading.Condition()
+        self._pending_count = 0
         self._thread = threading.Thread(
             target=self._worker, name="AsyncWriter", daemon=True
         )
@@ -109,6 +114,8 @@ class AsyncWriter:
             is_full=is_full,
             future=fut,
         )
+        with self._all_done:
+            self._pending_count += 1
         # put() blocks when queue is full — this is the back-pressure point
         self._queue.put(job)
         return fut
@@ -117,18 +124,15 @@ class AsyncWriter:
         """
         Block until all queued write jobs have been processed.
 
-        Raises RuntimeError if any job failed.
+        Uses a condition variable for efficient waiting instead of polling.
+        Raises TimeoutError if timeout is exceeded.
         """
-        # Use queue.join() which blocks until all items have been task_done()d
-        if timeout is not None:
-            # queue.join() doesn't support timeout directly; poll manually
-            deadline = time.monotonic() + timeout
-            while not self._queue.empty() or self._queue.unfinished_tasks > 0:
-                if time.monotonic() > deadline:
-                    raise TimeoutError("wait_all timed out")
-                time.sleep(0.01)
-        else:
-            self._queue.join()
+        with self._all_done:
+            if not self._all_done.wait_for(
+                lambda: self._pending_count == 0,
+                timeout=timeout,
+            ):
+                raise TimeoutError("wait_all timed out")
 
     def shutdown(self, wait: bool = True) -> None:
         """Gracefully stop the background thread."""
@@ -154,9 +158,13 @@ class AsyncWriter:
                 version = self._process_job(job)
                 job.future.set_result(version)
             except Exception as exc:
+                logger.error("Async write failed for step %s: %s", job.step, exc)
                 job.future.set_exception(exc)
             finally:
                 self._queue.task_done()
+                with self._all_done:
+                    self._pending_count -= 1
+                    self._all_done.notify_all()
 
     def _process_job(self, job: WriteJob) -> CheckpointVersion:
         """
@@ -170,14 +178,17 @@ class AsyncWriter:
         new_hashes: dict[str, str] = {}
         storage_bytes = 0
 
-        for name, tensor in job.dirty_tensors.items():
-            hexdigest = self._store.put(tensor)
-            new_hashes[name] = hexdigest
-            blob_path = self._store._blob_path(hexdigest)
-            try:
-                storage_bytes += blob_path.stat().st_size
-            except FileNotFoundError:
-                pass
+        names = list(job.dirty_tensors.keys())
+        tensors = list(job.dirty_tensors.values())
+
+        if names:
+            hex_digests = self._store.put_batch(tensors)
+            for name, hexdigest in zip(names, hex_digests):
+                new_hashes[name] = hexdigest
+                try:
+                    storage_bytes += self._store.blob_size(hexdigest)
+                except FileNotFoundError:
+                    pass
 
         # Merge: start from full_param_hashes, overwrite dirty entries
         merged_hashes = dict(job.full_param_hashes)

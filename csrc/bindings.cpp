@@ -2,8 +2,16 @@
 #include <torch/extension.h>
 #include <pybind11/stl.h>   // for automatic std::vector / std::string conversion
 
+#ifdef HAVE_BLOB_PREPARE
+#include "blob_prepare.h"
+#endif
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.doc() = "Incremental Checkpoint Engine — C++ delta computation via OpenMP";
+    m.doc() = "Incremental Checkpoint Engine — C++ delta computation and blob preparation";
 
     m.def(
         "compute_dirty_tensors",
@@ -35,4 +43,30 @@ Returns:
         return 1;
 #endif
     }, "Return the number of OpenMP threads available (1 if built without OpenMP).");
+
+#ifdef HAVE_BLOB_PREPARE
+    m.def(
+        "batch_prepare_blobs",
+        &batch_prepare_blobs_py,
+        R"doc(
+Prepare a batch of tensors for content-addressed storage in parallel.
+
+For each tensor: serialize (torch pickle) -> compress (zstd) -> SHA-256.
+All tensors are processed in parallel using OpenMP.
+
+Args:
+    tensors    : list[Tensor] — CPU contiguous tensors to prepare
+    zstd_level : int          — zstd compression level (default: 3)
+
+Returns:
+    list[tuple[str, bytes]] — (sha256_hex, compressed_bytes) per tensor
+)doc",
+        py::arg("tensors"),
+        py::arg("zstd_level") = 3
+    );
+
+    m.attr("HAS_BLOB_PREPARE") = true;
+#else
+    m.attr("HAS_BLOB_PREPARE") = false;
+#endif
 }

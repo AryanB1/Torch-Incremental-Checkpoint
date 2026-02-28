@@ -9,12 +9,18 @@ corrupts the existing manifest.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
+
+_SUPPORTED_SCHEMA_VERSIONS = {1}
 
 
 @dataclass
@@ -66,17 +72,33 @@ class Manifest:
         if not self._path.exists():
             return
         try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            text = self._path.read_text(encoding="utf-8")
+            raw = json.loads(text)
+            schema = raw.get("schema_version", 1)
+            if schema not in _SUPPORTED_SCHEMA_VERSIONS:
+                raise ValueError(
+                    f"Unsupported manifest schema version {schema}. "
+                    f"Supported: {_SUPPORTED_SCHEMA_VERSIONS}"
+                )
             self._versions = [
                 CheckpointVersion.from_dict(v) for v in raw.get("versions", [])
             ]
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
-            import warnings
-            warnings.warn(
-                f"Manifest at {self._path} could not be parsed ({exc}). "
-                "Starting with empty manifest.",
-                stacklevel=2,
-            )
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            # Back up the corrupted manifest before overwriting
+            backup = self._path.with_suffix(".json.bak")
+            try:
+                shutil.copy2(self._path, backup)
+                logger.warning(
+                    "Manifest at %s could not be parsed (%s). "
+                    "Corrupted file backed up to %s. Starting with empty manifest.",
+                    self._path, exc, backup,
+                )
+            except OSError:
+                logger.warning(
+                    "Manifest at %s could not be parsed (%s). "
+                    "Starting with empty manifest.",
+                    self._path, exc,
+                )
             self._versions = []
 
     def _save(self) -> None:

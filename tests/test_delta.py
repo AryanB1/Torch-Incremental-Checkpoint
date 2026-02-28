@@ -143,9 +143,9 @@ class TestEdgeCases:
     def test_threshold_boundary(self):
         engine_strict = DeltaEngine(threshold=0.0, use_cpp=False)
         base = {"w": torch.ones(10)}
-        current = {"w": torch.ones(10) + 1e-9}   # tiny change
+        current = {"w": torch.ones(10) + 1e-3}   # noticeable change
         result = engine_strict.compute_dirty(current, base)
-        # With threshold=0, even tiny changes count
+        # With threshold=0, any measurable change counts
         assert "w" in result.dirty_names
 
     def test_use_cpp_false_explicit(self):
@@ -157,3 +157,9 @@ class TestEdgeCases:
         if not _CPP_AVAILABLE:
             with pytest.raises(ImportError):
                 DeltaEngine(threshold=1e-4, use_cpp=True)
+
+    def test_shape_mismatch_raises(self, engine):
+        base = {"w": torch.zeros(10)}
+        current = {"w": torch.zeros(20)}  # different shape
+        with pytest.raises(ValueError, match="Shape mismatch"):
+            engine.compute_dirty(current, base)

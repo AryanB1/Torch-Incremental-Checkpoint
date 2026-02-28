@@ -5,7 +5,7 @@ requires = [
     "torch>=2.1",
     "pybind11>=2.11",
 ]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "pytorch-incremental-checkpoint"

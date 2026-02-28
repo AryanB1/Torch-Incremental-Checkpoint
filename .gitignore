@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+.eggs/
+lib/
+lib64/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# C / C++ build artifacts
+*.so
+*.o
+*.a
+*.out
+*.dylib
+*.dll
+
+# CMake / setuptools build dirs
+cmake-build-*/
+_skbuild/
+*.egg-info/
+
+# PyTorch / ML artifacts
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Secrets & credentials
+.env*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# MyPy
+.mypy_cache/

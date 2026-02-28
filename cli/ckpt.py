@@ -8,6 +8,7 @@ Commands
     ckpt info   <save_dir> <step>     — detailed info for a specific checkpoint
     ckpt stats  <save_dir>            — storage statistics
     ckpt blobs  <save_dir>            — list all content-addressed blobs
+    ckpt verify <save_dir>            — verify blob integrity
 
 Install: pip install -e .[cli]
 Run:     python -m cli.ckpt --help
@@ -16,6 +17,7 @@ Run:     python -m cli.ckpt --help
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -123,7 +125,9 @@ def cmd_list(save_dir: str, metric: str | None) -> None:
 @cli.command("info")
 @click.argument("save_dir")
 @click.argument("step", type=int)
-def cmd_info(save_dir: str, step: int) -> None:
+@click.option("--show-all", is_flag=True, default=False,
+              help="Show all parameter hashes instead of first 20.")
+def cmd_info(save_dir: str, step: int, show_all: bool) -> None:
     """Show detailed metadata for a specific checkpoint step."""
     manifest = _load_manifest(save_dir)
     version = manifest.get_version(step)
@@ -152,11 +156,13 @@ def cmd_info(save_dir: str, step: int) -> None:
 
     console.print(f"\n[bold]Parameter hashes[/] ({len(version.param_hashes)} total):")
     store = _load_store(save_dir)
-    for name, hexdigest in list(version.param_hashes.items())[:20]:
+    items = list(version.param_hashes.items())
+    display_items = items if show_all else items[:20]
+    for name, hexdigest in display_items:
         exists = "[green]ok[/]" if store.exists(hexdigest) else "[red]MISSING[/]"
         console.print(f"  {name[:60]:<60} {hexdigest[:12]}...  {exists}")
-    if len(version.param_hashes) > 20:
-        console.print(f"  ... and {len(version.param_hashes) - 20} more")
+    if not show_all and len(items) > 20:
+        console.print(f"  ... and {len(items) - 20} more (use --show-all to see all)")
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +253,7 @@ def cmd_blobs(save_dir: str, limit: int) -> None:
 
     for h in all_hashes[:limit]:
         try:
-            size = store._blob_path(h).stat().st_size
+            size = store.blob_size(h)
         except FileNotFoundError:
             size = 0
         table.add_row(h, _fmt_bytes(size))
@@ -256,6 +262,60 @@ def cmd_blobs(save_dir: str, limit: int) -> None:
         console.print(f"[dim](showing {limit} of {len(all_hashes)})[/]")
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# verify
+# ---------------------------------------------------------------------------
+
+@cli.command("verify")
+@click.argument("save_dir")
+@click.option("--step", type=int, default=None,
+              help="Verify blobs for a specific step only.")
+def cmd_verify(save_dir: str, step: int | None) -> None:
+    """Verify integrity of stored blobs by checking SHA-256 hashes."""
+    manifest = _load_manifest(save_dir)
+    store = _load_store(save_dir)
+
+    if step is not None:
+        version = manifest.get_version(step)
+        if version is None:
+            console.print(f"[red]Step {step} not found.[/]")
+            raise SystemExit(1)
+        hashes_to_check = set(version.param_hashes.values())
+    else:
+        hashes_to_check = set(store.all_hashes())
+
+    ok_count = 0
+    missing_count = 0
+    corrupt_count = 0
+
+    with console.status("[bold green]Verifying blobs...") as status:
+        for hexdigest in sorted(hashes_to_check):
+            blob_path = store._blob_path(hexdigest)
+            if not blob_path.exists():
+                console.print(f"  [red]MISSING[/]  {hexdigest}")
+                missing_count += 1
+                continue
+            data = blob_path.read_bytes()
+            actual = hashlib.sha256(data).hexdigest()
+            if actual != hexdigest:
+                console.print(f"  [red]CORRUPT[/]  {hexdigest} (got {actual[:16]}...)")
+                corrupt_count += 1
+            else:
+                ok_count += 1
+
+    total = ok_count + missing_count + corrupt_count
+    console.print(f"\n[bold]Verified {total} blobs:[/]")
+    console.print(f"  [green]OK:[/]      {ok_count}")
+    if missing_count:
+        console.print(f"  [red]Missing:[/] {missing_count}")
+    if corrupt_count:
+        console.print(f"  [red]Corrupt:[/] {corrupt_count}")
+    if missing_count == 0 and corrupt_count == 0:
+        console.print("[green]All blobs verified successfully.[/]")
+    else:
+        raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------

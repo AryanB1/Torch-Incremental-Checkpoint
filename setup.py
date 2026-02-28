@@ -84,6 +84,75 @@ def detect_openmp_link_args() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Detect libzstd and OpenSSL (for batch blob preparation)
+# ---------------------------------------------------------------------------
+
+def detect_zstd() -> tuple[list[str], list[str], bool]:
+    """Returns (include_dirs, library_dirs, found) for libzstd."""
+    # Try pkg-config first
+    try:
+        inc = subprocess.check_output(
+            ["pkg-config", "--cflags-only-I", "libzstd"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip().replace("-I", "")
+        lib = subprocess.check_output(
+            ["pkg-config", "--libs-only-L", "libzstd"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip().replace("-L", "")
+        return ([inc] if inc else [], [lib] if lib else [], True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    # Fallback: Homebrew paths (macOS)
+    if sys.platform == "darwin":
+        for prefix in ["/opt/homebrew", "/usr/local"]:
+            if Path(f"{prefix}/include/zstd.h").exists():
+                print(f"[setup] Found libzstd at {prefix}")
+                return ([f"{prefix}/include"], [f"{prefix}/lib"], True)
+
+    # Fallback: standard system paths (Linux)
+    if Path("/usr/include/zstd.h").exists():
+        return ([], [], True)
+
+    return ([], [], False)
+
+
+def detect_openssl() -> tuple[list[str], list[str], bool]:
+    """Returns (include_dirs, library_dirs, found) for OpenSSL libcrypto."""
+    # Try pkg-config
+    try:
+        inc = subprocess.check_output(
+            ["pkg-config", "--cflags-only-I", "libcrypto"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip().replace("-I", "")
+        lib = subprocess.check_output(
+            ["pkg-config", "--libs-only-L", "libcrypto"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip().replace("-L", "")
+        return ([inc] if inc else [], [lib] if lib else [], True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    # Fallback: Homebrew OpenSSL (macOS)
+    if sys.platform == "darwin":
+        for prefix in [
+            "/opt/homebrew/opt/openssl@3",
+            "/usr/local/opt/openssl@3",
+            "/opt/homebrew/opt/openssl",
+            "/usr/local/opt/openssl",
+        ]:
+            if Path(f"{prefix}/include/openssl/sha.h").exists():
+                print(f"[setup] Found OpenSSL at {prefix}")
+                return ([f"{prefix}/include"], [f"{prefix}/lib"], True)
+
+    # Fallback: standard system paths (Linux)
+    if Path("/usr/include/openssl/sha.h").exists():
+        return ([], [], True)
+
+    return ([], [], False)
+
+
+# ---------------------------------------------------------------------------
 # Extension definition
 # ---------------------------------------------------------------------------
 
@@ -94,16 +163,43 @@ extra_link_args = detect_openmp_link_args()
 # explicitly here for clarity / IDE support.
 torch_inc = torch.utils.cpp_extension.include_paths()
 
+# Base sources (always compiled)
+sources = [
+    "csrc/delta_engine.cpp",
+    "csrc/bindings.cpp",
+]
+
+all_include_dirs = ["csrc"] + include_dirs + torch_inc
+all_library_dirs = list(library_dirs)
+all_link_args = list(extra_link_args)
+all_compile_args = list(extra_compile_args)
+
+# Detect zstd and OpenSSL for batch blob preparation
+zstd_inc, zstd_lib, zstd_found = detect_zstd()
+ssl_inc, ssl_lib, ssl_found = detect_openssl()
+
+if zstd_found and ssl_found:
+    print("[setup] Found libzstd and libcrypto — enabling batch_prepare_blobs")
+    sources.append("csrc/blob_prepare.cpp")
+    all_include_dirs += zstd_inc + ssl_inc
+    all_library_dirs += zstd_lib + ssl_lib
+    all_link_args += ["-lzstd", "-lcrypto"]
+    all_compile_args.append("-DHAVE_BLOB_PREPARE")
+else:
+    if not zstd_found:
+        print("[setup] WARNING: libzstd not found — batch_prepare_blobs disabled")
+        print("[setup]          Install with: brew install zstd")
+    if not ssl_found:
+        print("[setup] WARNING: libcrypto (OpenSSL) not found — batch_prepare_blobs disabled")
+        print("[setup]          Install with: brew install openssl@3")
+
 delta_ext = CppExtension(
     name="delta_engine_cpp",
-    sources=[
-        "csrc/delta_engine.cpp",
-        "csrc/bindings.cpp",
-    ],
-    include_dirs=["csrc"] + include_dirs + torch_inc,
-    library_dirs=library_dirs,
-    extra_compile_args=extra_compile_args,
-    extra_link_args=extra_link_args,
+    sources=sources,
+    include_dirs=all_include_dirs,
+    library_dirs=all_library_dirs,
+    extra_compile_args=all_compile_args,
+    extra_link_args=all_link_args,
 )
 
 

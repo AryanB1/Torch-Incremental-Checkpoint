@@ -43,8 +43,8 @@ class TestPutGet:
         t = torch.randn(32, 32, dtype=torch.bfloat16)
         h = store.put(t)
         out = store.get(h)
-        # put() casts to float32 internally; recovered tensor is float32
-        assert out.dtype == torch.float32
+        # bfloat16 is preserved through serialization
+        assert out.dtype == torch.bfloat16
         assert out.shape == t.shape
 
     def test_large_tensor(self, store):
@@ -145,3 +145,96 @@ class TestLayout:
         blob   = subdir / h[2:]
         assert subdir.is_dir()
         assert blob.is_file()
+
+
+# ---------------------------------------------------------------------------
+# Integrity verification
+# ---------------------------------------------------------------------------
+
+class TestIntegrity:
+    def test_get_with_verify_passes_valid_blob(self, store):
+        t = torch.randn(16)
+        h = store.put(t)
+        out = store.get(h, verify=True)
+        assert torch.allclose(out, t, atol=1e-5)
+
+    def test_get_detects_corrupted_blob(self, store, tmp_path):
+        t = torch.randn(16)
+        h = store.put(t)
+        # Corrupt the blob on disk
+        blob_path = store._blob_path(h)
+        data = blob_path.read_bytes()
+        corrupted = bytes([b ^ 0xFF for b in data[:8]]) + data[8:]
+        blob_path.write_bytes(corrupted)
+        with pytest.raises(ValueError, match="integrity check failed"):
+            store.get(h, verify=True)
+
+    def test_get_without_verify_skips_check(self, store):
+        t = torch.randn(16)
+        h = store.put(t)
+        out = store.get(h, verify=False)
+        assert torch.allclose(out, t, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# blob_size
+# ---------------------------------------------------------------------------
+
+class TestBlobSize:
+    def test_blob_size_returns_positive(self, store):
+        h = store.put(torch.randn(100))
+        assert store.blob_size(h) > 0
+
+    def test_blob_size_nonexistent_raises(self, store):
+        with pytest.raises(FileNotFoundError):
+            store.blob_size("d" * 64)
+
+    def test_blob_size_matches_total_bytes(self, store):
+        hashes = [store.put(torch.tensor(float(i))) for i in range(3)]
+        total = sum(store.blob_size(h) for h in hashes)
+        assert total == store.total_bytes()
+
+
+# ---------------------------------------------------------------------------
+# put_batch
+# ---------------------------------------------------------------------------
+
+class TestPutBatch:
+    def test_batch_returns_correct_count(self, store):
+        tensors = [torch.randn(64, 64) for _ in range(5)]
+        hashes = store.put_batch(tensors)
+        assert len(hashes) == 5
+        assert all(len(h) == 64 for h in hashes)
+
+    def test_batch_blobs_readable_by_get(self, store):
+        """Blobs written by put_batch must be deserializable by get()."""
+        tensors = [torch.randn(16, 16) for _ in range(3)]
+        hashes = store.put_batch(tensors)
+        for orig, h in zip(tensors, hashes):
+            recovered = store.get(h)
+            assert torch.allclose(recovered, orig, atol=1e-5)
+
+    def test_batch_dedup(self, store):
+        """Identical tensors in a batch should produce the same hash."""
+        t = torch.ones(10)
+        hashes = store.put_batch([t, t, t])
+        assert hashes[0] == hashes[1] == hashes[2]
+
+    def test_batch_empty(self, store):
+        assert store.put_batch([]) == []
+
+    def test_batch_bfloat16(self, store):
+        """bfloat16 tensors should be handled correctly."""
+        t = torch.randn(8, 8, dtype=torch.bfloat16)
+        hashes = store.put_batch([t])
+        out = store.get(hashes[0])
+        assert out.dtype == torch.bfloat16
+
+    def test_batch_large_tensors(self, store):
+        """Batch of larger tensors should work correctly."""
+        tensors = [torch.randn(256, 256) for _ in range(4)]
+        hashes = store.put_batch(tensors)
+        assert len(set(hashes)) == 4  # all different
+        for orig, h in zip(tensors, hashes):
+            recovered = store.get(h)
+            assert torch.allclose(recovered, orig, atol=1e-5)

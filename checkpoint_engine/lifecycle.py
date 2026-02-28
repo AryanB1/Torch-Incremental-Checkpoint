@@ -14,10 +14,13 @@ Retention policy
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from .manifest import CheckpointVersion, Manifest
 from .store import ContentAddressedStore
+
+logger = logging.getLogger(__name__)
 
 
 class LifecycleManager:
@@ -77,18 +80,25 @@ class LifecycleManager:
             keep.add(v.step)
 
         # Keep best N by metric
-        scored = [
-            v for v in versions
-            if self.metric_key in v.metrics
-        ]
-        if scored:
-            scored_sorted = sorted(
-                scored,
-                key=lambda v: v.metrics[self.metric_key],
-                reverse=not self.lower_is_better,
-            )
-            for v in scored_sorted[:self.keep_best_n]:
-                keep.add(v.step)
+        if self.keep_best_n > 0:
+            scored = [
+                v for v in versions
+                if self.metric_key in v.metrics
+            ]
+            if scored:
+                scored_sorted = sorted(
+                    scored,
+                    key=lambda v: v.metrics[self.metric_key],
+                    reverse=not self.lower_is_better,
+                )
+                for v in scored_sorted[:self.keep_best_n]:
+                    keep.add(v.step)
+            elif len(versions) > 0:
+                logger.warning(
+                    "keep_best_n=%d but no versions have metric %r. "
+                    "Best-N retention will not apply until metrics are provided.",
+                    self.keep_best_n, self.metric_key,
+                )
 
         return keep
 
@@ -150,12 +160,11 @@ class LifecycleManager:
           "deleted_blobs"  : list[str]  — blob hashes deleted from store
           "freed_bytes"    : int        — approximate bytes reclaimed
         """
-        steps_to_delete = self.get_versions_to_delete()
+        # Compute keep set once and reuse to avoid redundant work
         retained_steps = self.get_versions_to_keep()
+        all_steps = self.manifest.steps()
+        steps_to_delete = [s for s in all_steps if s not in retained_steps]
 
-        # Compute orphaned blobs *before* removing versions so we can
-        # accurately compute freed_bytes
-        # First simulate manifest without the to-delete steps
         orphaned = self.get_orphaned_blobs(retained_steps)
 
         freed_bytes = 0
@@ -163,15 +172,13 @@ class LifecycleManager:
         deleted_steps: list[int] = []
 
         if not dry_run:
-            # Remove manifest entries
             for step in steps_to_delete:
                 if self.manifest.remove_version(step):
                     deleted_steps.append(step)
 
-            # Delete orphaned blobs
             for hexdigest in orphaned:
                 try:
-                    size = self.store._blob_path(hexdigest).stat().st_size
+                    size = self.store.blob_size(hexdigest)
                 except FileNotFoundError:
                     size = 0
                 if self.store.delete(hexdigest):
@@ -182,7 +189,7 @@ class LifecycleManager:
             deleted_blobs = orphaned
             for hexdigest in orphaned:
                 try:
-                    freed_bytes += self.store._blob_path(hexdigest).stat().st_size
+                    freed_bytes += self.store.blob_size(hexdigest)
                 except FileNotFoundError:
                     pass
 
@@ -195,7 +202,8 @@ class LifecycleManager:
     def summary(self) -> dict:
         """Return a human-readable summary of the current lifecycle state."""
         keep = self.get_versions_to_keep()
-        delete = self.get_versions_to_delete()
+        all_steps = self.manifest.steps()
+        delete = [s for s in all_steps if s not in keep]
         orphans = self.get_orphaned_blobs(keep)
         return {
             "total_versions": len(self.manifest),

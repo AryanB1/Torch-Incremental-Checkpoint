@@ -9,11 +9,14 @@ been run).
 
 from __future__ import annotations
 
+import logging
 import warnings
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 _CPP_AVAILABLE = False
 _cpp_ext = None
@@ -134,7 +137,17 @@ class DeltaEngine:
         DeltaResult
         """
         # Use intersection of keys (handles models that grew/shrank layers)
-        names = sorted(set(current.keys()) & set(base.keys()))
+        current_keys = set(current.keys())
+        base_keys = set(base.keys())
+        names = sorted(current_keys & base_keys)
+
+        added = current_keys - base_keys
+        removed = base_keys - current_keys
+        if added:
+            logger.info("New parameters not in base (will be treated as dirty): %s", added)
+        if removed:
+            logger.info("Parameters removed since base: %s", removed)
+
         if not names:
             return DeltaResult(
                 dirty_names=[],
@@ -145,6 +158,14 @@ class DeltaEngine:
 
         current_tensors = [current[n] for n in names]
         base_tensors    = [base[n]    for n in names]
+
+        # Validate matching shapes
+        for name, cur, bas in zip(names, current_tensors, base_tensors):
+            if cur.shape != bas.shape:
+                raise ValueError(
+                    f"Shape mismatch for parameter {name!r}: "
+                    f"current={cur.shape}, base={bas.shape}"
+                )
 
         if self._use_cpp and _cpp_ext is not None:
             dirty_names, delta_list, dirty_norms = _cpp_ext.compute_dirty_tensors(

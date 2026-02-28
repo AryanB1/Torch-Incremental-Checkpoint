@@ -24,6 +24,8 @@ Usage
 
 from __future__ import annotations
 
+import logging
+import threading
 import time
 import warnings
 from concurrent.futures import Future
@@ -39,6 +41,8 @@ from .lifecycle import LifecycleManager
 from .manifest import CheckpointVersion, Manifest
 from .metrics import CheckpointMetrics
 from .store import ContentAddressedStore
+
+logger = logging.getLogger(__name__)
 
 
 class CheckpointManager:
@@ -91,6 +95,7 @@ class CheckpointManager:
             max_pending=2,
         )
 
+        self._base_lock = threading.Lock()
         self._base_state: Optional[dict[str, torch.Tensor]] = None
         self._base_hashes: dict[str, str] = {}
 
@@ -131,7 +136,8 @@ class CheckpointManager:
     ) -> Future:
         """Write the full model as the base checkpoint (step 0 / first save)."""
         state = self._current_state()
-        self._base_state = state
+        with self._base_lock:
+            self._base_state = state
 
         # Treat every parameter as dirty for a full save
         dirty_tensors = dict(state)
@@ -148,9 +154,10 @@ class CheckpointManager:
         def _capture_hashes(f: Future) -> None:
             try:
                 version: CheckpointVersion = f.result()
-                self._base_hashes = dict(version.param_hashes)
-            except Exception:
-                pass
+                with self._base_lock:
+                    self._base_hashes = dict(version.param_hashes)
+            except Exception as exc:
+                logger.error("Failed to capture hashes for step %s: %s", step, exc)
         fut.add_done_callback(_capture_hashes)
         return fut
 
@@ -163,7 +170,13 @@ class CheckpointManager:
         """
         state: dict[str, torch.Tensor] = {}
         for name, hexdigest in version.param_hashes.items():
-            state[name] = self._store.get(hexdigest)
+            try:
+                state[name] = self._store.get(hexdigest)
+            except (FileNotFoundError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Failed to restore parameter {name!r} "
+                    f"(blob {hexdigest[:16]}...): {exc}"
+                ) from exc
         return state
 
     def save(
@@ -202,13 +215,18 @@ class CheckpointManager:
                 storage_bytes=self._store.total_bytes(),
             )
             return fut
+
         current_state = self._current_state()
+        with self._base_lock:
+            base_snapshot = self._base_state
+            base_hashes_snapshot = dict(self._base_hashes)
+
         delta_result: DeltaResult = self._delta_engine.compute_dirty(
             current=current_state,
-            base=self._base_state,
+            base=base_snapshot,
         )
 
-        full_hashes = dict(self._base_hashes)
+        full_hashes = base_hashes_snapshot
         dirty_as_current = {
             name: current_state[name] for name in delta_result.dirty_names
         }
@@ -222,14 +240,16 @@ class CheckpointManager:
             is_full=False,
         )
 
-        self._base_state = current_state
+        with self._base_lock:
+            self._base_state = current_state
 
         def _update_base_hashes(f: Future) -> None:
             try:
                 version: CheckpointVersion = f.result()
-                self._base_hashes = dict(version.param_hashes)
-            except Exception:
-                pass
+                with self._base_lock:
+                    self._base_hashes = dict(version.param_hashes)
+            except Exception as exc:
+                logger.error("Failed to update base hashes for step %s: %s", step, exc)
         fut.add_done_callback(_update_base_hashes)
 
         if not self.async_write:
@@ -291,9 +311,10 @@ class CheckpointManager:
 
         self.model.load_state_dict(converted, strict=False)
 
-        self._base_state = {k: v.detach().cpu().to(torch.float32).clone()
-                            for k, v in converted.items()}
-        self._base_hashes = dict(version.param_hashes)
+        with self._base_lock:
+            self._base_state = {k: v.detach().cpu().to(torch.float32).clone()
+                                for k, v in converted.items()}
+            self._base_hashes = dict(version.param_hashes)
 
     def wait_all(self, timeout: Optional[float] = None) -> None:
         """Block until all pending async writes have completed."""
