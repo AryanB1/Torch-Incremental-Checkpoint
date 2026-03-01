@@ -13,6 +13,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import statistics
 import sys
 import time
 from pathlib import Path
@@ -27,10 +28,6 @@ import torch.nn as nn
 
 from checkpoint_engine.delta import DeltaEngine, _CPP_AVAILABLE
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def get_device() -> torch.device:
     if torch.backends.mps.is_available():
@@ -99,11 +96,57 @@ def timed(fn, *args, **kwargs) -> tuple[float, object]:
     return time.perf_counter() - t0, result
 
 
-# ---------------------------------------------------------------------------
-# Main benchmark
-# ---------------------------------------------------------------------------
+def _plot_results(
+    py_times: list[float],
+    cpp_times: list[float],
+    speedup: float,
+    output_png: str,
+) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-def run_benchmark(repeats: int = 5, threshold: float = 1e-4) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle("Delta Engine — C++ (OpenMP) vs Pure Python", fontsize=14)
+
+    # 1. Per-run timing comparison
+    ax = axes[0]
+    runs = list(range(1, len(py_times) + 1))
+    ax.plot(runs, py_times, "o-", label="Pure Python", color="tomato")
+    ax.plot(runs, cpp_times, "s-", label="C++ / OpenMP", color="steelblue")
+    ax.set_xlabel("Run")
+    ax.set_ylabel("Time (ms)")
+    ax.set_title("Per-Run Dirty Detection Time")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(top=max(py_times) * 1.15)
+
+    # 2. Average comparison bar chart
+    ax = axes[1]
+    py_avg = statistics.mean(py_times)
+    cpp_avg = statistics.mean(cpp_times)
+    categories = ["Pure Python", "C++ / OpenMP"]
+    avgs = [py_avg, cpp_avg]
+    colors = ["tomato", "steelblue"]
+    bars = ax.bar(categories, avgs, color=colors, alpha=0.85)
+    ax.set_ylabel("Avg Time (ms)")
+    ax.set_title(f"Average Dirty Detection Time ({speedup:.1f}x speedup)")
+    for bar, avg in zip(bars, avgs):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + max(avgs) * 0.02,
+            f"{avg:.1f} ms",
+            ha="center", va="bottom", fontsize=11, fontweight="bold",
+        )
+    ax.set_ylim(top=max(avgs) * 1.15)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    plt.tight_layout()
+    plt.savefig(output_png, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def run_benchmark(repeats: int = 5, threshold: float = 1e-4, output_png: str = "benchmark_results.png") -> None:
     print(f"\n{'='*60}")
     print("Delta Engine Microbenchmark")
     print(f"{'='*60}")
@@ -113,11 +156,9 @@ def run_benchmark(repeats: int = 5, threshold: float = 1e-4) -> None:
     base = load_state_dict(device)
     current = make_perturbed(base, fraction=0.3)
 
-    # Pre-warm
-    py_engine  = DeltaEngine(threshold=threshold, use_cpp=False)
-    py_engine.compute_dirty(current, base)
+    py_engine = DeltaEngine(threshold=threshold, use_cpp=False)
+    py_engine.compute_dirty(current, base)  # pre-warm
 
-    # --- Pure Python ---
     print(f"\n[Pure Python] ({repeats} repeats)")
     py_times: list[float] = []
     for i in range(repeats):
@@ -127,18 +168,15 @@ def run_benchmark(repeats: int = 5, threshold: float = 1e-4) -> None:
               f"  dirty={result.num_dirty}/{len(base)}  "
               f"  ({result.dirty_ratio:.1%})")
 
-    import statistics
     print(f"  avg={statistics.mean(py_times):.1f}ms  "
           f"  median={statistics.median(py_times):.1f}ms")
 
-    # --- C++ ---
     if _CPP_AVAILABLE:
         import delta_engine_cpp
         n_omp = delta_engine_cpp.omp_thread_count()
         print(f"\n[C++ / OpenMP] ({repeats} repeats, {n_omp} threads)")
         cpp_engine = DeltaEngine(threshold=threshold, use_cpp=True)
-        # Pre-warm
-        cpp_engine.compute_dirty(current, base)
+        cpp_engine.compute_dirty(current, base)  # pre-warm
 
         cpp_times: list[float] = []
         for i in range(repeats):
@@ -153,15 +191,14 @@ def run_benchmark(repeats: int = 5, threshold: float = 1e-4) -> None:
 
         speedup = statistics.mean(py_times) / max(statistics.mean(cpp_times), 0.001)
         print(f"\nSpeedup (C++ vs Python): {speedup:.2f}x")
+
+        _plot_results(py_times, cpp_times, speedup, output_png)
+        print(f"Chart saved to: {output_png}")
     else:
         print("\n[C++] extension not built — run `pip install -e .` to enable.")
 
     print(f"\n{'='*60}")
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -171,6 +208,8 @@ if __name__ == "__main__":
                         help="Number of timed repetitions per backend (default: 5)")
     parser.add_argument("--threshold", type=float, default=1e-4,
                         help="Dirty detection threshold (default: 1e-4)")
+    parser.add_argument("--output",    type=str,   default="benchmark_results.png",
+                        help="Output path for the matplotlib chart (default: benchmark_results.png)")
     args = parser.parse_args()
 
-    run_benchmark(repeats=args.repeats, threshold=args.threshold)
+    run_benchmark(repeats=args.repeats, threshold=args.threshold, output_png=args.output)

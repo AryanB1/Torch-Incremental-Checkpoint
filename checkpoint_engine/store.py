@@ -47,10 +47,6 @@ class ContentAddressedStore:
         )
         self._decompressor = zstd.ZstdDecompressor()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _blob_path(self, hexdigest: str) -> Path:
         """Return the filesystem path for a given SHA-256 hex digest."""
         return self.root / hexdigest[:2] / hexdigest[2:]
@@ -69,10 +65,6 @@ class ContentAddressedStore:
 
     def _decompress(self, compressed: bytes) -> bytes:
         return self._decompressor.decompress(compressed)
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def put(self, tensor: torch.Tensor) -> str:
         """

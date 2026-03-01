@@ -53,9 +53,6 @@ class LifecycleManager:
         self.metric_key = metric_key
         self.lower_is_better = lower_is_better
 
-    # ------------------------------------------------------------------
-    # Policy computation
-    # ------------------------------------------------------------------
 
     def get_versions_to_keep(self) -> set[int]:
         """
@@ -135,9 +132,6 @@ class LifecycleManager:
         all_hashes = set(self.store.all_hashes())
         return list(all_hashes - referenced)
 
-    # ------------------------------------------------------------------
-    # Execution
-    # ------------------------------------------------------------------
 
     def run_gc(self, dry_run: bool = False) -> dict[str, list]:
         """

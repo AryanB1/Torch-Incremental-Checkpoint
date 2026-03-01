@@ -41,10 +41,6 @@ class DeltaResult:
         return len(self.dirty_names)
 
 
-# ---------------------------------------------------------------------------
-# Pure-Python fallback
-# ---------------------------------------------------------------------------
-
 def _py_relative_l2(current: torch.Tensor, base: torch.Tensor) -> float:
     c = current.detach().to(torch.float32).cpu()
     b = base.detach().to(torch.float32).cpu()

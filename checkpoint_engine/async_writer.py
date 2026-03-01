@@ -33,9 +33,6 @@ from .store import ContentAddressedStore
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Job dataclass
-# ---------------------------------------------------------------------------
 
 @dataclass
 class WriteJob:
@@ -48,9 +45,6 @@ class WriteJob:
     future: Future                            # resolved when write completes
 
 
-# ---------------------------------------------------------------------------
-# AsyncWriter
-# ---------------------------------------------------------------------------
 
 class AsyncWriter:
     """
@@ -80,9 +74,6 @@ class AsyncWriter:
         self._lock = threading.Lock()
         self._closed = False
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def enqueue(
         self,
@@ -144,9 +135,6 @@ class AsyncWriter:
         if wait:
             self._thread.join()
 
-    # ------------------------------------------------------------------
-    # Worker
-    # ------------------------------------------------------------------
 
     def _worker(self) -> None:
         while True:
